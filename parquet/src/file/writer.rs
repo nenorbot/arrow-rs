@@ -19,6 +19,7 @@
 //! using row group writers and column writers respectively.
 
 use crate::bloom_filter::Sbbf;
+use crate::file::statistics;
 use crate::format as parquet;
 use crate::format::{ColumnIndex, OffsetIndex, RowGroup};
 use std::fmt::Debug;
@@ -592,6 +593,117 @@ impl<'a, W: Write + Send> SerializedRowGroupWriter<'a, W> {
         on_close(close)
     }
 
+    pub fn append_column2<R: ChunkReader>(
+        &mut self,
+        readers: Vec<(&R, ColumnCloseResult)>,
+    ) -> Result<()> {
+        self.assert_previous_writer_closed()?;
+        let desc = self.next_column_desc().ok_or_else(|| {
+            general_err!("exhausted columns in SerializedRowGroupWriter")
+        })?;
+
+        let (_, close) = readers.get(0).expect("non-empty readers");
+
+        let metadata = &close.metadata;
+        let columns_match = readers[1..]
+            .iter()
+            .all(|(_, close)| columns_match(metadata, &close.metadata));
+
+        if !columns_match {
+            return Err(ParquetError::General("bla".to_owned()));
+        }
+
+        let compressed_size = readers
+            .iter()
+            .map(|(_, close)| close.metadata.compressed_size())
+            .sum();
+        let uncompressed_size = readers
+            .iter()
+            .map(|(_, close)| close.metadata.uncompressed_size())
+            .sum();
+        let num_values: i64 = readers
+            .iter()
+            .map(|(_, close)| close.metadata.num_values())
+            .sum();
+        let mut buf = Vec::with_capacity(compressed_size as usize);
+
+        let file_offset = self.buf.bytes_written() as i64;
+        let src_dictionary_offset = metadata.dictionary_page_offset();
+        let src_data_offset = metadata.data_page_offset();
+        let src_offset = src_dictionary_offset.unwrap_or(src_data_offset);
+        let src_length = metadata.compressed_size();
+
+        let map_offset = |x| x - src_offset + self.buf.bytes_written() as i64;
+        let mut builder = ColumnChunkMetaData::builder(metadata.column_descr_ptr())
+            .set_compression(metadata.compression())
+            .set_encodings(metadata.encodings().clone())
+            .set_file_offset(file_offset)
+            .set_total_compressed_size(compressed_size)
+            .set_total_uncompressed_size(uncompressed_size)
+            .set_num_values(metadata.num_values())
+            .set_data_page_offset(map_offset(src_data_offset))
+            .set_dictionary_page_offset(None);
+
+        let statistics = close.metadata.statistics().cloned();
+
+        let mut rows_written = 0;
+        let mut bytes_written = 0;
+        for (reader, close) in &readers {
+            let curr_metadata = &close.metadata;
+
+            if curr_metadata.column_descr() != desc.as_ref() {
+                return Err(general_err!(
+                    "column descriptor mismatch, expected {:?} got {:?}",
+                    desc,
+                    curr_metadata.column_descr()
+                ));
+            }
+
+            let src_length = curr_metadata.compressed_size();
+
+            let mut read = reader.get_read(src_offset as _)?.take(src_length as _);
+            let write_length = std::io::copy(&mut read, &mut buf)?;
+
+            if src_length as u64 != write_length {
+                return Err(general_err!(
+                "Failed to splice column data, expected {read_length} got {write_length}"
+            ));
+            }
+
+            bytes_written += close.bytes_written;
+            rows_written += close.rows_written;
+            // let file_offset = self.buf.bytes_written() as i64;
+
+            // let map_offset = |x| x - src_offset + write_offset as i64;
+
+            // if let Some(statistics) = curr_metadata.statistics() {
+            //     builder = builder.set_statistics(statistics.clone())
+            // }
+            // close.metadata = builder.build()?;
+
+            // if let Some(offsets) = close.offset_index.as_mut() {
+            //     for location in &mut offsets.page_locations {
+            //         location.offset = map_offset(location.offset)
+            //     }
+            // }
+        }
+
+        let chunk_metadata = builder.build()?;
+        SerializedPageWriter::new(self.buf).write_metadata(&chunk_metadata)?;
+
+        let close = ColumnCloseResult {
+            bytes_written,
+            rows_written,
+            metadata: chunk_metadata,
+            bloom_filter: None,
+            column_index: None,
+            offset_index: None,
+        };
+
+        let (_, on_close) = self.get_on_close();
+        on_close(close.clone())
+    }
+
     /// Closes this row group writer and returns row group metadata.
     pub fn close(mut self) -> Result<RowGroupMetaDataPtr> {
         if self.row_group_metadata.is_none() {
@@ -632,6 +744,14 @@ impl<'a, W: Write + Send> SerializedRowGroupWriter<'a, W> {
     }
 }
 
+fn columns_match(col1: &ColumnChunkMetaData, col2: &ColumnChunkMetaData) -> bool {
+    col1.column_type() != col2.column_type()
+        && col1.dictionary_page_offset().is_none()
+        && col2.dictionary_page_offset().is_none()
+        && col1.encodings() == col2.encodings()
+        && col1.statistics().is_some() == col2.statistics().is_some()
+}
+
 /// A wrapper around a [`ColumnWriter`] that invokes a callback on [`Self::close`]
 pub struct SerializedColumnWriter<'a> {
     inner: ColumnWriter<'a>,
@@ -641,6 +761,7 @@ pub struct SerializedColumnWriter<'a> {
 impl<'a> SerializedColumnWriter<'a> {
     /// Create a new [`SerializedColumnWriter`] from a [`ColumnWriter`] and an
     /// optional callback to be invoked on [`Self::close`]
+
     pub fn new(
         inner: ColumnWriter<'a>,
         on_close: Option<OnCloseColumnChunk<'a>>,
