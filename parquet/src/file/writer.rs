@@ -596,7 +596,7 @@ impl<'a, W: Write + Send> SerializedRowGroupWriter<'a, W> {
     pub fn append_column2<R: ChunkReader>(
         &mut self,
         readers: Vec<(&R, ColumnCloseResult)>,
-    ) -> Result<()> {
+    ) -> Result<AppendColumnsResult> {
         self.assert_previous_writer_closed()?;
         let desc = self.next_column_desc().ok_or_else(|| {
             general_err!("exhausted columns in SerializedRowGroupWriter")
@@ -610,7 +610,7 @@ impl<'a, W: Write + Send> SerializedRowGroupWriter<'a, W> {
             .all(|(_, close)| columns_match(metadata, &close.metadata));
 
         if !columns_match {
-            return Err(ParquetError::General("bla".to_owned()));
+            return Ok(AppendColumnsResult::ColumnMismatch);
         }
 
         let compressed_size = readers
@@ -625,7 +625,7 @@ impl<'a, W: Write + Send> SerializedRowGroupWriter<'a, W> {
             .iter()
             .map(|(_, close)| close.metadata.num_values())
             .sum();
-        let mut buf = Vec::with_capacity(compressed_size as usize);
+        // let mut buf = Vec::with_capacity(compressed_size as usize);
 
         let file_offset = self.buf.bytes_written() as i64;
         let src_dictionary_offset = metadata.dictionary_page_offset();
@@ -640,7 +640,7 @@ impl<'a, W: Write + Send> SerializedRowGroupWriter<'a, W> {
             .set_file_offset(file_offset)
             .set_total_compressed_size(compressed_size)
             .set_total_uncompressed_size(uncompressed_size)
-            .set_num_values(metadata.num_values())
+            // .set_num_values(metadata.num_values())
             .set_data_page_offset(map_offset(src_data_offset))
             .set_dictionary_page_offset(None);
 
@@ -648,6 +648,8 @@ impl<'a, W: Write + Send> SerializedRowGroupWriter<'a, W> {
 
         let mut rows_written = 0;
         let mut bytes_written = 0;
+        let mut null_count = 0;
+        let mut num_values = 0;
         for (reader, close) in &readers {
             let curr_metadata = &close.metadata;
 
@@ -662,7 +664,8 @@ impl<'a, W: Write + Send> SerializedRowGroupWriter<'a, W> {
             let src_length = curr_metadata.compressed_size();
 
             let mut read = reader.get_read(src_offset as _)?.take(src_length as _);
-            let write_length = std::io::copy(&mut read, &mut buf)?;
+            let write_length = std::io::copy(&mut read, &mut self.buf)?;
+            // let write_length = std::io::copy(&mut read, &mut buf)?;
 
             if src_length as u64 != write_length {
                 return Err(general_err!(
@@ -672,6 +675,7 @@ impl<'a, W: Write + Send> SerializedRowGroupWriter<'a, W> {
 
             bytes_written += close.bytes_written;
             rows_written += close.rows_written;
+            num_values += close.metadata.num_values();
             // let file_offset = self.buf.bytes_written() as i64;
 
             // let map_offset = |x| x - src_offset + write_offset as i64;
@@ -688,6 +692,11 @@ impl<'a, W: Write + Send> SerializedRowGroupWriter<'a, W> {
             // }
         }
 
+        builder = builder.set_num_values(num_values);
+
+        // let buf = &mut buf.as_slice();
+        // assert_eq!(write_length, buf.len() as u64);
+
         let chunk_metadata = builder.build()?;
         SerializedPageWriter::new(self.buf).write_metadata(&chunk_metadata)?;
 
@@ -701,7 +710,7 @@ impl<'a, W: Write + Send> SerializedRowGroupWriter<'a, W> {
         };
 
         let (_, on_close) = self.get_on_close();
-        on_close(close.clone())
+        on_close(close.clone()).map(|_| AppendColumnsResult::Ok)
     }
 
     /// Closes this row group writer and returns row group metadata.
@@ -744,8 +753,22 @@ impl<'a, W: Write + Send> SerializedRowGroupWriter<'a, W> {
     }
 }
 
+pub enum AppendColumnsResult {
+    Ok,
+    ColumnMismatch,
+}
+
 fn columns_match(col1: &ColumnChunkMetaData, col2: &ColumnChunkMetaData) -> bool {
-    col1.column_type() != col2.column_type()
+    // println!("{:?}", col1.dictionary_page_offset());
+    // println!("{:?}", col2.dictionary_page_offset());
+    // println!("{:?}", col1.column_type());
+    // println!("{:?}", col2.column_type());
+    // println!("{:?}", col1.encodings());
+    // println!("{:?}", col2.encodings());
+    // println!("{:?}", col1.statistics());
+    // println!("{:?}", col2.statistics());
+    // println!("{}", col1.encodings() == col2.encodings());
+    col1.column_type() == col2.column_type()
         && col1.dictionary_page_offset().is_none()
         && col2.dictionary_page_offset().is_none()
         && col1.encodings() == col2.encodings()

@@ -71,7 +71,7 @@ impl Args {
             .map(|x| {
                 let reader = File::open(x)?;
                 let metadata = parquet::file::footer::parse_metadata(&reader)?;
-                Ok((reader, metadata))
+                Ok((x.to_owned(), metadata))
             })
             .collect::<Result<Vec<_>>>()?;
 
@@ -86,12 +86,19 @@ impl Args {
         }
 
         let props = Arc::new(WriterProperties::builder().build());
-        let schema = inputs[0].1.file_metadata().schema_descr().root_schema_ptr();
+        let schema =
+            Schema::new(vec![Field::new("src_obj__user_data", DataType::Utf8, true)]);
+        let schema = arrow_to_parquet_schema(&schema)?.root_schema_ptr();
+        // let schema = inputs[0].1.file_metadata().schema_descr().root_schema_ptr();
         let mut writer = SerializedFileWriter::new(output, schema, props)?;
 
-        for (input, metadata) in inputs {
+        let mut rg_out = writer.next_row_group()?;
+        let mut column_map = HashMap::new();
+        let mut files = HashMap::new();
+
+        for (input, metadata) in &inputs {
+            files.insert(input.to_owned(), File::open(input).unwrap());
             for rg in metadata.row_groups() {
-                let mut rg_out = writer.next_row_group()?;
                 for column in rg.columns() {
                     let result = ColumnCloseResult {
                         bytes_written: column.compressed_size() as _,
@@ -101,12 +108,27 @@ impl Args {
                         column_index: None,
                         offset_index: None,
                     };
-                    rg_out.append_column(&input, result)?;
+                    let cols = column_map
+                        .entry(column.column_descr().name().to_owned())
+                        .or_insert_with(|| vec![]);
+                    cols.push((input.to_owned(), result.clone()));
                 }
-                rg_out.close()?;
             }
         }
 
+        for (col_name, metadata) in column_map {
+            if col_name != "src_obj__user_data" {
+                continue;
+            }
+            let inputs = metadata
+                .into_iter()
+                .map(|(path, close)| (files.get(&path).unwrap(), close))
+                .collect::<Vec<_>>();
+            println!("appending {} inputs", inputs.len());
+            rg_out.append_column2(inputs).unwrap();
+        }
+
+        rg_out.close()?;
         writer.close()?;
 
         Ok(())
