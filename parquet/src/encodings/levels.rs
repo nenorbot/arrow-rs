@@ -27,11 +27,7 @@ use crate::util::bit_util::{ceil, num_required_bits, BitWriter};
 /// repetition/definition level and number of total buffered values (includes null
 /// values).
 #[inline]
-pub fn max_buffer_size(
-    encoding: Encoding,
-    max_level: i16,
-    num_buffered_values: usize,
-) -> usize {
+pub fn max_buffer_size(encoding: Encoding, max_level: i16, num_buffered_values: usize) -> usize {
     let bit_width = num_required_bits(max_level as u64);
     match encoding {
         Encoding::RLE => RleEncoder::max_buffer_size(bit_width, num_buffered_values),
@@ -89,13 +85,22 @@ impl LevelEncoder {
     /// Returns number of encoded values that are less than or equal to length of the
     /// input buffer.
     #[inline]
-    pub fn put(&mut self, buffer: &[i16]) -> usize {
+    pub fn put(&mut self, buffer: &[i16], runs: Option<&[(i16, usize)]>) -> usize {
         let mut num_encoded = 0;
         match *self {
             LevelEncoder::Rle(ref mut encoder) | LevelEncoder::RleV2(ref mut encoder) => {
-                for value in buffer {
-                    encoder.put(*value as u64);
-                    num_encoded += 1;
+                if let Some(runs) = runs {
+                    // panic!();
+                    // println!("{}, {runs:?}", buffer.len());
+                    for &(value, count) in runs {
+                        encoder.put_bulk(value as u64, count);
+                        num_encoded += count;
+                    }
+                } else {
+                    for value in buffer {
+                        encoder.put(*value as u64);
+                        num_encoded += 1;
+                    }
                 }
                 encoder.flush();
             }

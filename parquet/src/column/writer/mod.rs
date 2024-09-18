@@ -226,6 +226,7 @@ pub struct GenericColumnWriter<'a, E: ColumnValueEncoder> {
     // column index and offset index
     column_index_builder: ColumnIndexBuilder,
     offset_index_builder: OffsetIndexBuilder,
+    def_levels_runs_sink: Vec<(i16, usize)>,
 }
 
 impl<'a, E: ColumnValueEncoder> GenericColumnWriter<'a, E> {
@@ -277,6 +278,7 @@ impl<'a, E: ColumnValueEncoder> GenericColumnWriter<'a, E> {
             column_index_builder: ColumnIndexBuilder::new(),
             offset_index_builder: OffsetIndexBuilder::new(),
             encodings,
+            def_levels_runs_sink: vec![],
         }
     }
 
@@ -503,6 +505,9 @@ impl<'a, E: ColumnValueEncoder> GenericColumnWriter<'a, E> {
             })?;
 
             let mut values_to_write = 0;
+            let mut last_level = levels[0];
+            let mut curr_run_len = 0;
+            let mut def_level_runs = vec![];
             for &level in levels {
                 if level == self.descr.max_def_level() {
                     values_to_write += 1;
@@ -510,9 +515,19 @@ impl<'a, E: ColumnValueEncoder> GenericColumnWriter<'a, E> {
                     // We must always compute this as it is used to populate v2 pages
                     self.page_metrics.num_page_nulls += 1
                 }
+
+                if level != last_level {
+                    def_level_runs.push((last_level, curr_run_len));
+                    last_level = level;
+                    curr_run_len = 1;
+                } else {
+                    curr_run_len += 1;
+                }
             }
+            def_level_runs.push((last_level, curr_run_len));
 
             self.def_levels_sink.extend_from_slice(levels);
+            self.def_levels_runs_sink.extend_from_slice(&def_level_runs);
             values_to_write
         } else {
             num_levels
@@ -717,6 +732,7 @@ impl<'a, E: ColumnValueEncoder> GenericColumnWriter<'a, E> {
                             Encoding::RLE,
                             &self.rep_levels_sink[..],
                             max_rep_level,
+                            None,
                         )[..],
                     );
                 }
@@ -727,6 +743,8 @@ impl<'a, E: ColumnValueEncoder> GenericColumnWriter<'a, E> {
                             Encoding::RLE,
                             &self.def_levels_sink[..],
                             max_def_level,
+                            // None,
+                            Some(&self.def_levels_runs_sink[..]),
                         )[..],
                     );
                 }
@@ -808,6 +826,7 @@ impl<'a, E: ColumnValueEncoder> GenericColumnWriter<'a, E> {
         // Reset state.
         self.rep_levels_sink.clear();
         self.def_levels_sink.clear();
+        self.def_levels_runs_sink.clear();
         self.page_metrics = PageMetrics::default();
 
         Ok(())
@@ -879,9 +898,15 @@ impl<'a, E: ColumnValueEncoder> GenericColumnWriter<'a, E> {
 
     /// Encodes definition or repetition levels for Data Page v1.
     #[inline]
-    fn encode_levels_v1(&self, encoding: Encoding, levels: &[i16], max_level: i16) -> Vec<u8> {
+    fn encode_levels_v1(
+        &self,
+        encoding: Encoding,
+        levels: &[i16],
+        max_level: i16,
+        level_runs: Option<&[(i16, usize)]>,
+    ) -> Vec<u8> {
         let mut encoder = LevelEncoder::v1(encoding, max_level, levels.len());
-        encoder.put(levels);
+        encoder.put(levels, level_runs);
         encoder.consume()
     }
 
@@ -890,7 +915,7 @@ impl<'a, E: ColumnValueEncoder> GenericColumnWriter<'a, E> {
     #[inline]
     fn encode_levels_v2(&self, levels: &[i16], max_level: i16) -> Vec<u8> {
         let mut encoder = LevelEncoder::v2(max_level, levels.len());
-        encoder.put(levels);
+        encoder.put(levels, None);
         encoder.consume()
     }
 

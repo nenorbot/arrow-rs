@@ -71,7 +71,7 @@ impl DataPageBuilderImpl {
             return 0;
         }
         let mut level_encoder = LevelEncoder::v1(Encoding::RLE, max_level, levels.len());
-        level_encoder.put(levels);
+        level_encoder.put(levels, None);
         let encoded_levels = level_encoder.consume();
         // Actual encoded bytes (without length offset)
         let encoded_bytes = &encoded_levels[mem::size_of::<i32>()..];
