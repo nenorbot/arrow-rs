@@ -278,7 +278,7 @@ where
                         .read_def_levels(out, total_levels_read..total_levels_read + levels_read)?;
 
                     if read != levels_read {
-                        return Err(general_err!("insufficient definition levels read from column - expected {rep_levels}, got {read}"));
+                        return Err(general_err!(&format!("insufficient definition levels read from column - expected {levels_read}, got {read}")));
                     }
 
                     let null_count = out.count_nulls(

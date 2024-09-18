@@ -226,6 +226,8 @@ pub struct GenericColumnWriter<'a, E: ColumnValueEncoder> {
     // column index and offset index
     column_index_builder: ColumnIndexBuilder,
     offset_index_builder: OffsetIndexBuilder,
+    def_levels_runs_sink: Vec<(i16, usize)>,
+    num_levels: usize,
 }
 
 impl<'a, E: ColumnValueEncoder> GenericColumnWriter<'a, E> {
@@ -277,6 +279,8 @@ impl<'a, E: ColumnValueEncoder> GenericColumnWriter<'a, E> {
             column_index_builder: ColumnIndexBuilder::new(),
             offset_index_builder: OffsetIndexBuilder::new(),
             encodings,
+            def_levels_runs_sink: vec![],
+            num_levels: 0,
         }
     }
 
@@ -291,6 +295,9 @@ impl<'a, E: ColumnValueEncoder> GenericColumnWriter<'a, E> {
         max: Option<&E::T>,
         distinct_count: Option<u64>,
     ) -> Result<usize> {
+        if !self.def_levels_runs_sink.is_empty() {
+            self.add_data_page()?;
+        }
         // Check if number of definition levels is the same as number of repetition levels.
         if let (Some(def), Some(rep)) = (def_levels, rep_levels) {
             if def.len() != rep.len() {
@@ -421,6 +428,60 @@ impl<'a, E: ColumnValueEncoder> GenericColumnWriter<'a, E> {
         )
     }
 
+    pub fn write_def_level_range_batch(
+        &mut self,
+        values: &E::Values,
+        def_level: i16,
+        num_levels: usize,
+        min: Option<&E::T>,
+        max: Option<&E::T>,
+        distinct_count: Option<u64>,
+    ) -> Result<usize> {
+        if self.descr.max_rep_level() > 0 {
+            return Err(general_err!(
+                "Cannot write def level range when rep level > 0",
+            ));
+        }
+        if self.statistics_enabled == EnabledStatistics::Chunk {
+            match (min, max) {
+                (Some(min), Some(max)) => {
+                    update_min(&self.descr, min, &mut self.column_metrics.min_column_value);
+                    update_max(&self.descr, max, &mut self.column_metrics.max_column_value);
+                }
+                (None, Some(_)) | (Some(_), None) => {
+                    panic!("min/max should be both set or both None")
+                }
+                (None, None) => {}
+            };
+        }
+
+        // We can only set the distinct count if there are no other writes
+        if self.encoder.num_values() == 0 {
+            self.column_metrics.column_distinct_count = distinct_count;
+        } else {
+            self.column_metrics.column_distinct_count = None;
+        }
+
+        let mut values_offset = 0;
+        let mut levels_offset = 0;
+        let base_batch_size = self.props.write_batch_size();
+        while levels_offset < num_levels {
+            let end_offset = num_levels.min(levels_offset + base_batch_size);
+
+            values_offset += self.write_mini_batch_with_def_level(
+                values,
+                values_offset,
+                None,
+                end_offset - levels_offset,
+                def_level,
+            )?;
+            levels_offset = end_offset;
+        }
+
+        // Return total number of values processed.
+        Ok(values_offset)
+    }
+
     /// Returns total number of bytes written by this column writer so far.
     /// This value is also returned when column writer is closed.
     ///
@@ -479,6 +540,57 @@ impl<'a, E: ColumnValueEncoder> GenericColumnWriter<'a, E> {
             column_index,
             offset_index,
         })
+    }
+
+    fn write_mini_batch_with_def_level(
+        &mut self,
+        values: &E::Values,
+        values_offset: usize,
+        value_indices: Option<&[usize]>,
+        num_levels: usize,
+        def_level: i16,
+    ) -> Result<usize> {
+        if !self.def_levels_sink.is_empty() {
+            self.add_data_page()?;
+        }
+        if let Some((last_def_level, last_count)) = self.def_levels_runs_sink.last_mut() {
+            if *last_def_level == def_level {
+                *last_count += num_levels;
+            } else {
+                self.def_levels_runs_sink.push((def_level, num_levels));
+            }
+        } else {
+            self.def_levels_runs_sink.push((def_level, num_levels));
+        }
+        self.num_levels += num_levels;
+        let values_to_write = if def_level == self.descr.max_def_level() {
+            num_levels
+        } else {
+            self.page_metrics.num_page_nulls += num_levels as u64;
+            0
+        };
+
+        self.page_metrics.num_buffered_rows += num_levels as u32;
+
+        match value_indices {
+            Some(indices) => {
+                let indices = &indices[values_offset..values_offset + values_to_write];
+                self.encoder.write_gather(values, indices)?;
+            }
+            None => self.encoder.write(values, values_offset, values_to_write)?,
+        }
+
+        self.page_metrics.num_buffered_values += num_levels as u32;
+
+        if self.should_add_data_page() {
+            self.add_data_page()?;
+        }
+
+        if self.should_dict_fallback() {
+            self.dict_fallback()?;
+        }
+
+        Ok(values_to_write)
     }
 
     /// Writes mini batch of values, definition and repetition levels.
@@ -717,6 +829,8 @@ impl<'a, E: ColumnValueEncoder> GenericColumnWriter<'a, E> {
                             Encoding::RLE,
                             &self.rep_levels_sink[..],
                             max_rep_level,
+                            None,
+                            self.num_levels,
                         )[..],
                     );
                 }
@@ -727,6 +841,12 @@ impl<'a, E: ColumnValueEncoder> GenericColumnWriter<'a, E> {
                             Encoding::RLE,
                             &self.def_levels_sink[..],
                             max_def_level,
+                            if !self.def_levels_runs_sink.is_empty() {
+                                Some(&self.def_levels_runs_sink[..])
+                            } else {
+                                None
+                            },
+                            self.num_levels,
                         )[..],
                     );
                 }
@@ -808,6 +928,8 @@ impl<'a, E: ColumnValueEncoder> GenericColumnWriter<'a, E> {
         // Reset state.
         self.rep_levels_sink.clear();
         self.def_levels_sink.clear();
+        self.def_levels_runs_sink.clear();
+        self.num_levels = 0;
         self.page_metrics = PageMetrics::default();
 
         Ok(())
@@ -879,9 +1001,16 @@ impl<'a, E: ColumnValueEncoder> GenericColumnWriter<'a, E> {
 
     /// Encodes definition or repetition levels for Data Page v1.
     #[inline]
-    fn encode_levels_v1(&self, encoding: Encoding, levels: &[i16], max_level: i16) -> Vec<u8> {
-        let mut encoder = LevelEncoder::v1(encoding, max_level, levels.len());
-        encoder.put(levels);
+    fn encode_levels_v1(
+        &self,
+        encoding: Encoding,
+        levels: &[i16],
+        max_level: i16,
+        level_runs: Option<&[(i16, usize)]>,
+        num_levels: usize,
+    ) -> Vec<u8> {
+        let mut encoder = LevelEncoder::v1(encoding, max_level, num_levels.max(levels.len()));
+        encoder.put(levels, level_runs);
         encoder.consume()
     }
 
@@ -890,7 +1019,7 @@ impl<'a, E: ColumnValueEncoder> GenericColumnWriter<'a, E> {
     #[inline]
     fn encode_levels_v2(&self, levels: &[i16], max_level: i16) -> Vec<u8> {
         let mut encoder = LevelEncoder::v2(max_level, levels.len());
-        encoder.put(levels);
+        encoder.put(levels, None);
         encoder.consume()
     }
 
