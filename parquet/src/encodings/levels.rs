@@ -90,12 +90,77 @@ impl LevelEncoder {
         match *self {
             LevelEncoder::Rle(ref mut encoder) | LevelEncoder::RleV2(ref mut encoder) => {
                 if let Some(runs) = runs {
-                    // panic!();
+                    // let bit_width = num_required_bits(1);
+                    // let mut e1 = RleEncoder::new(bit_width, 1024);
+                    // let mut e2 = RleEncoder::new(bit_width, 1024);
                     // println!("{}, {runs:?}", buffer.len());
+                    // println!("----------------------- encoding levels -------------------------");
                     for &(value, count) in runs {
                         encoder.put_bulk(value as u64, count);
                         num_encoded += count;
+                        // println!("~~~~~~~~ ENCODING RUN: value={value}, count={count} ~~~~~~~~");
+                        // println!("============= e1.put_bulk =============");
+                        // e1.put_bulk(value as u64, count);
+                        // println!("============= e2.put =============");
+                        // for _ in 0..count {
+                        //     e2.put(value as u64);
+                        // }
+                        // if e1.num_buffered_values != e2.num_buffered_values
+                        //     || e1.repeat_count != e2.repeat_count
+                        //     || e1.bit_packed_count != e2.bit_packed_count
+                        //     || e1.current_value != e2.current_value
+                        // {
+                        //     println!(
+                        //         "e1 stats: nbv={}, rc={}, bpc={}, cv={}",
+                        //         e1.num_buffered_values,
+                        //         e1.repeat_count,
+                        //         e1.bit_packed_count,
+                        //         e1.current_value
+                        //     );
+                        //     println!(
+                        //         "e2 stats: nbv={}, rc={}, bpc={}, cv={}",
+                        //         e2.num_buffered_values,
+                        //         e2.repeat_count,
+                        //         e2.bit_packed_count,
+                        //         e2.current_value
+                        //     );
+                        //     panic!("wtf");
+                        // }
+                        // println!("============= flushing e1 =============");
+                        // e1.flush();
+                        // println!("============= flushing e2 =============");
+                        // e2.flush();
+                        // println!("e1: {:?}", e1.buffer());
+                        // println!("e2: {:?}", e2.buffer());
+                        // assert_eq!(e1.buffer(), e2.buffer(), "runs: {runs:?}");
+                        // assert!(e1.buffer() == e2.buffer());
                     }
+                    // e1.flush();
+                    // e2.flush();
+
+                    // if e1.num_buffered_values != e2.num_buffered_values
+                    //     || e1.repeat_count != e2.repeat_count
+                    //     || e1.bit_packed_count != e2.bit_packed_count
+                    //     || e1.current_value != e2.current_value
+                    // {
+                    //     println!(
+                    //         "e1 stats: nbv={}, rc={}, bpc={}, cv={}",
+                    //         e1.num_buffered_values,
+                    //         e1.repeat_count,
+                    //         e1.bit_packed_count,
+                    //         e1.current_value
+                    //     );
+                    //     println!(
+                    //         "e2 stats: nbv={}, rc={}, bpc={}, cv={}",
+                    //         e2.num_buffered_values,
+                    //         e2.repeat_count,
+                    //         e2.bit_packed_count,
+                    //         e2.current_value
+                    //     );
+                    //     panic!();
+                    // }
+                    // assert_eq!(e1.buffer(), e2.buffer(), "runs: {runs:?}");
+                    // println!("num encoded: {num_encoded}");
                 } else {
                     for value in buffer {
                         encoder.put(*value as u64);

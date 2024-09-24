@@ -56,22 +56,22 @@ pub struct RleEncoder {
     bit_writer: BitWriter,
 
     // Buffered values for bit-packed runs.
-    buffered_values: [u64; 8],
+    pub buffered_values: [u64; 8],
 
     // Number of current buffered values. Must be less than 8.
-    num_buffered_values: usize,
+    pub num_buffered_values: usize,
 
     // The current (also last) value that was written and the count of how many
     // times in a row that value has been seen.
-    current_value: u64,
+    pub current_value: u64,
 
     // The number of repetitions for `current_value`. If this gets too high we'd
     // switch to use RLE encoding.
-    repeat_count: usize,
+    pub repeat_count: usize,
 
     // Number of bit-packed values in the current run. This doesn't include values
     // in `buffered_values`.
-    bit_packed_count: usize,
+    pub bit_packed_count: usize,
 
     // The position of the indicator byte in the `bit_writer`.
     indicator_byte_pos: i64,
@@ -125,13 +125,16 @@ impl RleEncoder {
 
     #[inline]
     pub fn put_bulk(&mut self, value: u64, count: usize) {
-        // println!(
-        //     "curr_value = {}, value = {value}, count = {count}, rc = {}, bpc = {}",
-        //     self.current_value, self.repeat_count, self.bit_packed_count,
-        // );
+        assert!(count > 0, "Count must be positive");
         let remaining = 8 - self.num_buffered_values;
+        // println!(
+        //     "curr_value = {}, value = {value}, count = {count}, rc = {}, bpc = {}, nbv = {}, buf = {:?}",
+        //     self.current_value, self.repeat_count, self.bit_packed_count,
+        //     self.num_buffered_values, self.buffered_values
+        // );
         if self.current_value == value {
-            if self.repeat_count > 8 {
+            if self.repeat_count >= 8 {
+                // || (self.num_buffered_values == 0 && count >= 8) {
                 self.repeat_count += count;
                 return;
             }
@@ -141,26 +144,101 @@ impl RleEncoder {
                 self.num_buffered_values += 1;
                 self.repeat_count += 1;
             }
+            // println!(
+            //     "wrote {n} values, nbv={}, rc={}",
+            //     self.num_buffered_values, self.repeat_count
+            // );
             if self.num_buffered_values == 8 {
+                // if self.repeat_count < 8 {
+                //     new_count = count - self.repeat_count;
+                // }
                 // Buffered values are full. Flush them.
-                if self.repeat_count < 8 {
-                    // println!(
-                    //     "pre flush = {}, rc = {}",
-                    //     self.current_value, self.repeat_count
-                    // );
-                    assert_eq!(self.bit_packed_count % 8, 0);
-                    self.flush_buffered_values();
-                    // println!("after flush = {}", self.current_value);
-                    if count > n {
-                        for _ in 0..(count - n).min(8) {
-                            self.buffered_values[self.num_buffered_values] = value;
-                            self.num_buffered_values += 1;
+                assert_eq!(self.bit_packed_count % 8, 0);
+                self.flush_buffered_values();
+                // println!(
+                //     "after first flush, nbv={}, rc = {}, n = {n}",
+                //     self.num_buffered_values, self.repeat_count
+                // );
+                if count > n {
+                    let mut remaining_run = count - n;
+                    // println!("remaining run: {remaining_run}, filling with {}", remaining_run.min(8));
+                    // Fill buffer
+                    for _ in 0..remaining_run.min(8) {
+                        self.repeat_count += 1;
+                        remaining_run -= 1;
+                        if self.repeat_count > 8 {
+                            break;
                         }
-                        self.repeat_count = count - n;
+                        self.buffered_values[self.num_buffered_values] = value;
+                        self.num_buffered_values += 1;
                     }
-                } else {
-                    self.repeat_count += count;
+
+                    // println!(
+                    //     "second flush? nbv = {}, rc = {}",
+                    //     self.num_buffered_values, self.repeat_count
+                    // );
+                    if self.num_buffered_values == 8 && self.repeat_count <= 8 {
+                        // Buffered values are full. Flush them.
+                        assert_eq!(self.bit_packed_count % 8, 0);
+                        self.flush_buffered_values();
+                        // println!(
+                        //     "after second flush, nbv={} rc={}",
+                        //     self.num_buffered_values, self.repeat_count
+                        // );
+                    }
+
+                    // println!("remaining run: {remaining_run}");
+                    self.repeat_count += remaining_run;
+
+                    // if self.repeat_count <= 8 {
+                    //     for _ in 0..(count - n).min(8) {
+                    //         self.repeat_count += 1;
+                    //         if self.repeat_count > 8 {
+                    //             break;
+                    //         }
+                    //         self.buffered_values[self.num_buffered_values] = value;
+                    //         self.num_buffered_values += 1;
+                    //     }
+                    //     println!(
+                    //         "second flush? nbv = {}, rc = {}",
+                    //         self.num_buffered_values, self.repeat_count
+                    //     );
+                    //     if self.num_buffered_values == 8 && self.repeat_count <= 8 {
+                    //         // Buffered values are full. Flush them.
+                    //         assert_eq!(self.bit_packed_count % 8, 0);
+                    //         self.flush_buffered_values();
+                    //         println!(
+                    //             "after second flush, nbv={} rc={}",
+                    //             self.num_buffered_values, self.repeat_count
+                    //         );
+                    //     }
+                    //     println!("new_count={new_count}, n={n}");
+                    // }
+                    // self.repeat_count += count - self.repeat_count;
                 }
+                // // Buffered values are full. Flush them.
+                // if true { //self.repeat_count < 8 {
+                //     // println!(
+                //     //     "pre flush = {}, rc = {}",
+                //     //     self.current_value, self.repeat_count
+                //     // );
+                //     assert_eq!(self.bit_packed_count % 8, 0);
+                //     self.flush_buffered_values();
+                //     println!(
+                //         "after flush, nbv={}, rc = {}",
+                //         self.num_buffered_values, self.repeat_count
+                //     );
+                //     // println!("after flush = {}", self.current_value);
+                //     if count > n {
+                //         for _ in 0..(count - n).min(8) {
+                //             self.buffered_values[self.num_buffered_values] = value;
+                //             self.num_buffered_values += 1;
+                //         }
+                //         self.repeat_count = count - n;
+                //     }
+                // } else {
+                //     self.repeat_count += count - n;
+                // }
             }
         } else {
             if self.repeat_count >= 8 {
@@ -173,68 +251,70 @@ impl RleEncoder {
                 self.flush_rle_run();
             }
             self.current_value = value;
+            // if self.num_buffered_values == 0 && count > 8 {
+            //     self.repeat_count = count;
+            //     if self.bit_packed_count > 0 {
+            //         assert_eq!(self.bit_packed_count % 8, 0);
+            //         self.flush_buffered_values();
+            //     }
+            //     return;
+            // }
             let n = remaining.min(count);
+            self.repeat_count = 0;
             for _ in 0..n {
                 self.buffered_values[self.num_buffered_values] = value;
                 self.num_buffered_values += 1;
                 self.repeat_count += 1;
             }
             if self.num_buffered_values == 8 {
+                let mut new_count = count;
+                if self.repeat_count < 8 {
+                    new_count = count - self.repeat_count;
+                }
                 // Buffered values are full. Flush them.
                 assert_eq!(self.bit_packed_count % 8, 0);
                 self.flush_buffered_values();
+                // println!(
+                //     "after first flush, nbv={}, rc = {}",
+                //     self.num_buffered_values, self.repeat_count
+                // );
                 if count > n {
-                    for _ in 0..(count - n).min(8) {
-                        self.buffered_values[self.num_buffered_values] = value;
-                        self.num_buffered_values += 1;
-                        self.repeat_count += 1;
+                    if self.repeat_count <= 8 {
+                        for _ in 0..(count - n).min(8) {
+                            self.repeat_count += 1;
+                            if self.repeat_count > 8 {
+                                break;
+                            }
+                            self.buffered_values[self.num_buffered_values] = value;
+                            self.num_buffered_values += 1;
+                        }
+                        // println!(
+                        //     "second flush? nbv = {}, rc = {}",
+                        //     self.num_buffered_values, self.repeat_count
+                        // );
+                        if self.num_buffered_values == 8 && self.repeat_count <= 8 {
+                            // Buffered values are full. Flush them.
+                            assert_eq!(self.bit_packed_count % 8, 0);
+                            self.flush_buffered_values();
+                            // println!(
+                            //     "after second flush, nbv={} rc={}",
+                            //     self.num_buffered_values, self.repeat_count
+                            // );
+                        }
+                        // println!("new_count={new_count}, n={n}");
                     }
-                    self.repeat_count = count - n;
+                    self.repeat_count = new_count;
+                    // self.repeat_count += count_left - self.repeat_count;
+                    // if self.repeat_count == 0 {
+                    //     self.repeat_count = count;
+                    // } else {
+                    //     self.repeat_count = count - n;
+                    // }
                 }
             } else if count > 8 {
                 self.repeat_count = count;
             }
         }
-        //////////
-        // This function buffers 8 values at a time. After seeing 8 values, it
-        // decides whether the current run should be encoded in bit-packed or RLE.
-        // if self.current_value == value {
-        //     println!("extending {value} with {count}, rc: {}", self.repeat_count);
-        //     self.repeat_count += count;
-        //     if self.repeat_count > 8 {
-        //         // A continuation of last value. No need to buffer.
-        //         return;
-        //     }
-        // } else {
-        //     if self.repeat_count >= 8 {
-        //         // The current RLE run has ended and we've gathered enough. Flush first.
-        //         assert_eq!(
-        //             self.bit_packed_count, 0,
-        //             "rc = {}, value = {}, num_buffered = {}, {:?}",
-        //             self.repeat_count, value, self.num_buffered_values, self.buffered_values
-        //         );
-        //         self.flush_rle_run();
-        //     }
-        //     self.repeat_count = count;
-        //     self.current_value = value;
-        // }
-
-        // let n = 8 - self.num_buffered_values;
-        // for _ in 0..count.min(n) {
-        //     self.buffered_values[self.num_buffered_values] = value;
-        //     self.num_buffered_values += 1;
-        // }
-
-        // println!(
-        //     "\t v={value}, c={count}, rc={}, n={}, {:?}, ({})",
-        //     self.repeat_count, n, self.buffered_values, self.num_buffered_values
-        // );
-
-        // if self.num_buffered_values == 8 {
-        //     // Buffered values are full. Flush them.
-        //     assert_eq!(self.bit_packed_count % 8, 0);
-        //     self.flush_buffered_values();
-        // }
     }
 
     /// Encodes `value`, which must be representable with `bit_width` bits.
@@ -242,6 +322,14 @@ impl RleEncoder {
     pub fn put(&mut self, value: u64) {
         // This function buffers 8 values at a time. After seeing 8 values, it
         // decides whether the current run should be encoded in bit-packed or RLE.
+        // println!(
+        //     "put(): curr_value = {}, value = {value}, rc = {}, bpc = {}, nbv = {}, buf = {:?}",
+        //     self.current_value,
+        //     self.repeat_count,
+        //     self.bit_packed_count,
+        //     self.num_buffered_values,
+        //     self.buffered_values
+        // );
         if self.current_value == value {
             self.repeat_count += 1;
             if self.repeat_count > 8 {
@@ -315,6 +403,10 @@ impl RleEncoder {
     /// internal writer.
     #[inline]
     pub fn flush(&mut self) {
+        // println!(
+        //     "flush: bpc: {}, rc: {}, nbv: {}",
+        //     self.bit_packed_count, self.repeat_count, self.num_buffered_values
+        // );
         if self.bit_packed_count > 0 || self.repeat_count > 0 || self.num_buffered_values > 0 {
             let all_repeat = self.bit_packed_count == 0
                 && (self.repeat_count == self.num_buffered_values || self.num_buffered_values == 0);
@@ -379,6 +471,14 @@ impl RleEncoder {
 
     #[inline(never)]
     fn flush_buffered_values(&mut self) {
+        // println!(
+        //     "flush_buffered_values: curr_value = {}, rc = {}, bpc = {}, nbv = {}, buf = {:?}",
+        //     self.current_value,
+        //     self.repeat_count,
+        //     self.bit_packed_count,
+        //     self.num_buffered_values,
+        //     self.buffered_values
+        // );
         // println!(
         //     "flush_buffered_values rc: {}, bpc: {}",
         //     self.repeat_count, self.bit_packed_count
