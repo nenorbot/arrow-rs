@@ -85,20 +85,13 @@ impl LevelEncoder {
     /// Returns number of encoded values that are less than or equal to length of the
     /// input buffer.
     #[inline]
-    pub fn put(&mut self, buffer: &[i16], runs: Option<&[(i16, usize)]>) -> usize {
+    pub fn put(&mut self, buffer: &[i16]) -> usize {
         let mut num_encoded = 0;
         match *self {
             LevelEncoder::Rle(ref mut encoder) | LevelEncoder::RleV2(ref mut encoder) => {
-                if let Some(runs) = runs {
-                    for &(value, count) in runs {
-                        encoder.put_bulk(value as u64, count);
-                        num_encoded += count;
-                    }
-                } else {
-                    for value in buffer {
-                        encoder.put(*value as u64);
-                        num_encoded += 1;
-                    }
+                for value in buffer {
+                    encoder.put(*value as u64);
+                    num_encoded += 1;
                 }
                 encoder.flush();
             }
@@ -108,6 +101,27 @@ impl LevelEncoder {
                     num_encoded += 1;
                 }
                 encoder.flush();
+            }
+        }
+        num_encoded
+    }
+
+    /// Put/encode levels vector into this level encoder.
+    /// Returns number of encoded values that are less than or equal to length of the
+    /// input buffer.
+    #[inline]
+    pub fn put_bulk(&mut self, runs: &[(i16, usize)]) -> usize {
+        let mut num_encoded = 0;
+        match *self {
+            LevelEncoder::Rle(ref mut encoder) | LevelEncoder::RleV2(ref mut encoder) => {
+                for &(value, count) in runs {
+                    encoder.put_bulk(value as u64, count);
+                    num_encoded += count;
+                }
+                encoder.flush();
+            }
+            LevelEncoder::BitPacked(_, _) => {
+                unimplemented!()
             }
         }
         num_encoded

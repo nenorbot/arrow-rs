@@ -829,26 +829,26 @@ impl<'a, E: ColumnValueEncoder> GenericColumnWriter<'a, E> {
                             Encoding::RLE,
                             &self.rep_levels_sink[..],
                             max_rep_level,
-                            None,
-                            self.num_levels,
                         )[..],
                     );
                 }
 
                 if max_def_level > 0 {
-                    buffer.extend_from_slice(
+                    let encoded_levels = if self.def_levels_runs_sink.is_empty() {
                         &self.encode_levels_v1(
                             Encoding::RLE,
                             &self.def_levels_sink[..],
                             max_def_level,
-                            if !self.def_levels_runs_sink.is_empty() {
-                                Some(&self.def_levels_runs_sink[..])
-                            } else {
-                                None
-                            },
+                        )[..]
+                    } else {
+                        &self.encode_levels_v1_bulk(
+                            Encoding::RLE,
+                            &self.def_levels_runs_sink[..],
                             self.num_levels,
-                        )[..],
-                    );
+                            max_def_level,
+                        )[..]
+                    };
+                    buffer.extend_from_slice(encoded_levels);
                 }
 
                 buffer.extend_from_slice(values_data.buf.data());
@@ -1001,16 +1001,23 @@ impl<'a, E: ColumnValueEncoder> GenericColumnWriter<'a, E> {
 
     /// Encodes definition or repetition levels for Data Page v1.
     #[inline]
-    fn encode_levels_v1(
+    fn encode_levels_v1(&self, encoding: Encoding, levels: &[i16], max_level: i16) -> Vec<u8> {
+        let mut encoder = LevelEncoder::v1(encoding, max_level, levels.len());
+        encoder.put(levels);
+        encoder.consume()
+    }
+
+    /// Encodes definition or repetition levels for Data Page v1.
+    #[inline]
+    fn encode_levels_v1_bulk(
         &self,
         encoding: Encoding,
-        levels: &[i16],
-        max_level: i16,
-        level_runs: Option<&[(i16, usize)]>,
+        level_runs: &[(i16, usize)],
         num_levels: usize,
+        max_level: i16,
     ) -> Vec<u8> {
-        let mut encoder = LevelEncoder::v1(encoding, max_level, num_levels.max(levels.len()));
-        encoder.put(levels, level_runs);
+        let mut encoder = LevelEncoder::v1(encoding, max_level, num_levels);
+        encoder.put_bulk(level_runs);
         encoder.consume()
     }
 
@@ -1019,7 +1026,7 @@ impl<'a, E: ColumnValueEncoder> GenericColumnWriter<'a, E> {
     #[inline]
     fn encode_levels_v2(&self, levels: &[i16], max_level: i16) -> Vec<u8> {
         let mut encoder = LevelEncoder::v2(max_level, levels.len());
-        encoder.put(levels, None);
+        encoder.put(levels);
         encoder.consume()
     }
 
